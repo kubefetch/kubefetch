@@ -1,0 +1,160 @@
+---
+- name: Init deploy
+  hosts: localhost
+  become: yes
+  become_user: root
+  connection: local
+  any_errors_fatal: true
+  gather_facts: no
+  tasks:
+    - debug:
+        msg:
+          - "*******************************************************************************************"
+          - "==================================Start deploying kubefetch================================"
+          - "*******************************************************************************************"
+    - name:
+      wait_for:
+        delay: 3
+        timeout: 0
+
+- name: Exchange Keys between servers
+  hosts: "{{ ansible_play_batch }}"
+  become: yes
+  become_user: root
+  any_errors_fatal: true
+  gather_facts: no
+  roles:
+    - role: set-default
+  tasks:
+    - name: SSH KeyGen command
+      shell: >
+        ssh-keygen -q -b 2048 -t rsa -N "" -C "creating SSH" -f ~/.ssh/id_rsa
+        creates="~/.ssh/id_rsa"
+    - name: Fetch the keyfile from the node to master
+      fetch:
+        src: "~/.ssh/id_rsa.pub"
+        dest: "buffer/{{ipv4_address}}-id_rsa.pub"
+        flat: yes
+    - name: Ssh 
+      authorized_key:
+        user: root
+        state: present
+        key: "{{ lookup('file','buffer/{{item}}-id_rsa.pub')}}"
+      with_items:
+        - "{{ groups['kubefetch'] }}"
+    - name: ssh-knows
+      copy:
+        src: "~/.ssh/known_hosts"
+        dest: "~/.ssh/known_hosts"
+
+- name: host file update
+  hosts: "{{ansible_play_hosts |sort () }}"
+  order: reverse_inventory
+  gather_facts: true
+  tags: ye
+  tasks:
+    - name: Update the /etc/hosts file with node name
+      lineinfile:
+        path: "/etc/hosts"
+        regexp: ".*\t{{ hostvars[item]['ansible_hostname']}}\t{{ hostvars[item]['ansible_hostname']}}"
+        line: "{{ hostvars[item]['ansible_env'].SSH_CONNECTION.split(' ')[2] }}\t{{ hostvars[item]['ansible_hostname']}}"
+        state: present
+        backup: yes
+      with_items: "{{groups['kubefetch']}}"
+    - name: View file contents
+      raw: cat /etc/hosts
+      register: result
+    - name: Print
+      debug: var=result.stdout_lines
+
+- name: Close the firewalld service swapoff
+  hosts: "{{ansible_play_batch}}"
+  tags: be
+  gather_facts: no
+  become: yes
+  become_user: root
+  any_errors_fatal: true
+  tasks:
+    - name: Disable firewalld Services
+      systemd:
+        name: "{{item}}"
+        state: stopped  
+        enabled: no
+      with_items:
+        - firewalld
+      register: firewalld_service_disable
+      failed_when: "firewalld_service_disable|failed and ('Could not find the requested service' not in firewalld_service_disable.msg)"
+      ignore_errors: yes
+    - name: Temporarily closed 
+      raw: setenforce 0
+      ignore_errors: yes
+    - name: Permanent ban
+      lineinfile:
+        dest: /etc/selinux/config
+        regexp: "^SELINUX="
+        line: "SELINUX=disabled"
+
+- name: Close the firewalld service swapoff
+  hosts: "{{ansible_play_batch}}"
+  tags: bef
+  gather_facts: no
+  become: yes
+  become_user: root
+  any_errors_fatal: true
+  tasks:
+    - name: Temporarily close swap
+      raw: swapoff -a
+    - name: backup swap
+      raw: yes | cp /etc/fstab /etc/fstab_bak
+    - name: Permanently close swap
+      lineinfile:
+        dest: /etc/fstab
+        regexp: ".*swap"
+        line: ""
+
+- name: Uninstall chrony on the previous version
+  hosts: "{{ hosts | default('kubefetch') }}"
+  tags: rpm
+  gather_facts: no
+  become: yes
+  become_user: root
+  any_errors_fatal: true
+  tasks:
+    - name: Uninstall chrony ready
+      raw: rpm -qa |grep chrony
+      register: rpm_check
+    - name: Uninstall and reinstall the new Chrony
+      raw: rpm -e --nodeps chrony
+    - debug: msg="rpm packages is install but is old package"
+      when: rpm_check.rc == 0
+
+- name: Clean temporary files produced by ansible
+  hosts: localhost
+  gather_facts: no
+  become: yes
+  become_user: root
+  connection: local
+  any_errors_fatal: true
+  tasks:
+    - name: Ansible check file exists example
+      stat:
+        path: ./init-host.retry
+      register: file_details
+    - name: Remove file
+      file:
+        path: ./init-host.retry
+        state: absent
+    - debug:
+        msg: "The file exists it has also been removed by default"
+      when: file_details.stat.exists == true
+    - name: remove
+      stat:
+         path: ./buffer
+      register: files_to_delete
+    - name: Remover buffer
+      file:
+        path: ./buffer
+        state: absent
+    - debug:
+        msg: "This is where the kill mission will be performed"
+      when: files_to_delete.stat.exists and files_to_delete.stat.isdir

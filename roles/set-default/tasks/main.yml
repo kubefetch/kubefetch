@@ -1,0 +1,12 @@
+---
+- name: Gather system info
+  setup:
+    filter: ansible_*
+
+- name: Set common vars
+  set_fact:
+    ipv4_address: "{% if 'address' in ansible_default_ipv4 %}{{ansible_default_ipv4.address}}{% elif 'ansible_'~default_interface in vars %}{{vars['ansible_'~default_interface].ipv4.address}}{%else%}{{ansible_all_ipv4_addresses.0}}{%endif%}"
+
+- name: Set flag after checked
+  set_fact:
+    set_default_success: yes

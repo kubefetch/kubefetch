@@ -1,0 +1,2 @@
+#The IP from the managed side can also use Ansible as the managed side
+[kubefetch]
