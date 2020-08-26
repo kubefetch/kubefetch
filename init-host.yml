@@ -9,13 +9,22 @@
   tasks:
     - debug:
         msg:
-          - "*******************************************************************************************"
-          - "==================================Start deploying kubefetch================================"
-          - "*******************************************************************************************"
+          - "**********************************************************************************"
+          - "================== Start Deploying kubefetch version {{lookup('file', 'VERSION')}} ======================="         
+          - "**********************************************************************************"
     - name:
       wait_for:
         delay: 3
         timeout: 0
+    - name: Gather system time
+      setup:
+        filter: ansible_date_time
+    - name: Set start time
+      set_fact:
+        time_start: "{{ ansible_date_time.epoch }}"
+    - name: Display the current timestamp in YYYY-MM-DD
+      debug:
+        var=ansible_date_time.date
 
 - name: Exchange Keys between servers
   hosts: "{{ ansible_play_batch }}"
@@ -35,14 +44,14 @@
         src: "~/.ssh/id_rsa.pub"
         dest: "buffer/{{ipv4_address}}-id_rsa.pub"
         flat: yes
-    - name: Ssh 
+    - name: Configure ssh key
       authorized_key:
         user: root
         state: present
         key: "{{ lookup('file','buffer/{{item}}-id_rsa.pub')}}"
       with_items:
         - "{{ groups['kubefetch'] }}"
-    - name: ssh-knows
+    - name: Complete non-confidential login to each host
       copy:
         src: "~/.ssh/known_hosts"
         dest: "~/.ssh/known_hosts"
@@ -88,6 +97,8 @@
     - name: Temporarily closed 
       raw: setenforce 0
       ignore_errors: yes
+      register: detection_check
+    - debug: msg="If the above red error occurs, it is because you have set setenForce to 0, so ignore this error here, most of them are not turned off by default, thank you"
     - name: Permanent ban
       lineinfile:
         dest: /etc/selinux/config
@@ -119,14 +130,34 @@
   become: yes
   become_user: root
   any_errors_fatal: true
+  ignore_errors: yes
   tasks:
     - name: Uninstall chrony ready
       raw: rpm -qa |grep chrony
       register: rpm_check
     - name: Uninstall and reinstall the new Chrony
       raw: rpm -e --nodeps chrony
-    - debug: msg="rpm packages is install but is old package"
+    - debug: msg="rpm packages is install but is old package and now The original pkg has been unloaded"
       when: rpm_check.rc == 0
+
+- name: Install new time synchronization
+  hosts: "{{ hosts | default('kubefetch') }}"
+  tags: rpmz
+  gather_facts: no
+  become: yes
+  become_user: root
+  any_errors_fatal: true
+  ignore_errors: yes
+  tasks:
+    - name: Prepare the chrony rpm and distribute it to all hosts
+      copy:
+         src: /home/kubefetch/ansible/package-init/chrony-3.4-1.el7.x86_64.rpm
+         dest: /tmp/
+    - name: Install the new Chrony
+      raw: rpm -i /tmp/chrony-3.4-1.el7.x86_64.rpm
+      register: rpm_check
+    - debug: msg="If the above error occurs, you have installed it once. Please don't do it again. It is recommended that you uninstall the cluster again"
+      when: rpm_check.rc != 0
 
 - name: Clean temporary files produced by ansible
   hosts: localhost
