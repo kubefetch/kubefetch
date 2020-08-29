@@ -22,9 +22,8 @@
     - name: Set start time
       set_fact:
         time_start: "{{ ansible_date_time.epoch }}"
-    - name: Display the current timestamp in YYYY-MM-DD
-      debug:
-        var=ansible_date_time.date
+    - debug: var=ansible_date_time.date
+    - debug: var=ansible_date_time.time
 
 - name: Exchange Keys between servers
   hosts: "{{ ansible_play_batch }}"
@@ -32,6 +31,7 @@
   become_user: root
   any_errors_fatal: true
   gather_facts: no
+  tags: ssh
   roles:
     - role: set-default
   tasks:
@@ -60,7 +60,7 @@
   hosts: "{{ansible_play_hosts |sort () }}"
   order: reverse_inventory
   gather_facts: true
-  tags: ye
+  tags: hosts
   tasks:
     - name: Update the /etc/hosts file with node name
       lineinfile:
@@ -75,14 +75,16 @@
       register: result
     - name: Print
       debug: var=result.stdout_lines
+    - name: Please note that
+      debug: msg="If you have executed playBook for many times, the file hosts will be appended for many times. You need to clean up manually. Here I will print out your current hosts for you"
 
 - name: Close the firewalld service swapoff
   hosts: "{{ansible_play_batch}}"
-  tags: be
   gather_facts: no
   become: yes
   become_user: root
   any_errors_fatal: true
+  tags: firewalld
   tasks:
     - name: Disable firewalld Services
       systemd:
@@ -105,13 +107,13 @@
         regexp: "^SELINUX="
         line: "SELINUX=disabled"
 
-- name: Close the firewalld service swapoff
+- name: Close the swap swapoff
   hosts: "{{ansible_play_batch}}"
-  tags: bef
   gather_facts: no
   become: yes
   become_user: root
   any_errors_fatal: true
+  tags: swap
   tasks:
     - name: Temporarily close swap
       raw: swapoff -a
@@ -158,6 +160,94 @@
       register: rpm_check
     - debug: msg="If the above error occurs, you have installed it once. Please don't do it again. It is recommended that you uninstall the cluster again"
       when: rpm_check.rc != 0
+    - name: Modify the default configuration
+      replace:
+        path: /etc/chrony.conf
+        regexp: "^server"
+        replace: "#server"
+    - name: Add a time synchronization configuration
+      lineinfile:
+        dest: /etc/chrony.conf
+        line: |
+                    server 0.asia.pool.ntp.org iburst
+                    server 1.asia.pool.ntp.org iburst
+                    server 2.asia.pool.ntp.org iburst
+                    server 3.asia.pool.ntp.org iburst
+    - name: Set the time zone
+      raw: timedatectl set-timezone Asia/Shanghai
+    - name: Restart the service and set up boot
+      systemd:
+        state: restarted
+        enabled: yes
+        name: chronyd.service
+    - name: Verify current time
+      shell: timedatectl |grep -w Local
+      register: time_date
+    - debug: msg={{ time_date.stdout_lines }}
+
+- name: The kernel optimization
+  hosts: "{{ hosts | default('kubefetch') }}"
+  tags: kernel
+  gather_facts: no
+  become: yes
+  become_user: root
+  any_errors_fatal: true
+  ignore_errors: yes
+  tasks:
+    - name: The kernel optimization
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        sysctl_file: /etc/sysctl.conf
+        sysctl_set: yes
+        state: present
+        reload: yes
+      become: true
+      with_items:
+              - { name: 'kernel.pid_max', value: '196608'}
+              - { name: 'net.ipv4.ip_forward', value: '1' }
+              - { name: 'vm.max_map_count', value: '262144'}
+              - { name: 'net.ipv4.neigh.default.gc_thresh1', value: '8000'}
+              - { name: 'net.ipv4.neigh.default.gc_thresh2', value: '9000'}
+              - { name: 'net.ipv4.neigh.default.gc_thresh3', value: '10000'}
+              - { name: 'fs.inotify.max_user_watches', value: '1048576'}
+              - { name: 'fs.inotify.max_user_instances', value: '8192'}
+              - { name: 'net.core.somaxconn', value: '32768'}
+              - { name: 'net.core.wmem_max', value: '26214400'}
+              - { name: 'net.core.rmem_max', value: '26214400'}
+              - { name: 'net.core.rmem_default', value: '26214400'}
+              - { name: 'net.ipv4.tcp_wmem', value: '4096 12582912 16777216'}
+              - { name: 'net.ipv4.tcp_rmem', value: '4096 12582912 16777216'}
+              - { name: 'net.ipv4.tcp_max_syn_backlog', value: '8096'}
+              - { name: 'net.ipv4.tcp_slow_start_after_idle', value: '0'}
+              - { name: 'net.ipv4.tcp_tw_reuse', value: '1'}
+              - { name: 'net.core.netdev_max_backlog', value: '16384'}
+              - { name: 'fs.file-max', value: '2097152'}
+              - { name: 'net.ipv4.ip_forward', value: '1'}
+              - { name: 'fs.inotify.max_queued_events', value: '16384'}
+              - { name: 'net.ipv4.conf.default.promote_secondaries', value: '1'}
+      ignore_errors: yes
+    - name: increase system OS limit nofile
+      pam_limits:
+        domain: '*'
+        limit_type: "{{ item }}"
+        limit_item: nofile
+        value: 65535
+      with_items:
+        - hard
+        - soft
+    - name: config logrotate.conf
+      lineinfile:
+        path: /etc/logrotate.conf
+        regexp: 'rotate 4'
+        line: 'rotate 1'
+      when: ansible_os_family == "RedHat" or ansible_os_family=="KylinOS" or ansible_os_family=="Kylin"
+    - name: enable logrotate compress for RH os
+      replace:
+        path: /etc/logrotate.conf
+        regexp: '^#(.*compress.*)'
+        replace: '\1'
+      when: ansible_os_family == "RedHat" or ansible_os_family=="KylinOS" or ansible_os_family=="Kylin"
 
 - name: Clean temporary files produced by ansible
   hosts: localhost
@@ -166,6 +256,7 @@
   become_user: root
   connection: local
   any_errors_fatal: true
+  tags: clean
   tasks:
     - name: Ansible check file exists example
       stat:
